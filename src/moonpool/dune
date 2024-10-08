@@ -1,7 +1,0 @@
-
-(library
-  (name fuseau_moonpool)
-  (public_name fuseau.moonpool)
-  (synopsis "interoperability between fuseau and moonpool")
-  (optional)
-  (libraries fuseau moonpool))
