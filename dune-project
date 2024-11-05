@@ -24,14 +24,13 @@
   (ocaml
    (>= 5.0))
   dune
+  (picos (and (>= 0.5) (< 0.6)))
   (mtime
    (>= 2.0))
   (trace (>= 0.6))
   (trace-tef :with-test)
   (mdx :with-test)
   thread-local-storage)
- (depopts
-   moonpool)
  (tags
   (await effects event-loop thread-local-storage)))
 

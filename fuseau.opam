@@ -11,6 +11,7 @@ bug-reports: "https://github.com/c-cube/fuseau/issues"
 depends: [
   "ocaml" {>= "5.0"}
   "dune" {>= "3.0"}
+  "picos" {>= "0.5" & < "0.6"}
   "mtime" {>= "2.0"}
   "trace" {>= "0.6"}
   "trace-tef" {with-test}
@@ -18,7 +19,6 @@ depends: [
   "thread-local-storage"
   "odoc" {with-doc}
 ]
-depopts: ["moonpool"]
 build: [
   ["dune" "subst"] {dev}
   [
