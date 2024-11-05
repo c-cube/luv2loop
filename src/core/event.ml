@@ -5,6 +5,8 @@ type 'a t = {
 
 type 'ret branch = When : 'a t * ('a -> 'ret) -> 'ret branch
 
+let _cancel_exn : Exn_bt.t = Exn_bt.get_callstack 0 Sys.Break
+
 let rec select_rec_ brs =
   let rec poll_list_ = function
     | When (ev, f) :: tl ->
@@ -16,24 +18,22 @@ let rec select_rec_ brs =
     | [] ->
       (* no branch worked. Now let's wait. *)
       let cancel_handlers = ref [] in
-      Fiber.suspend ~before_suspend:(fun ~wakeup ->
-          (* make sure we call [wakeup] only once *)
-          let woken_up = ref false in
-          let wakeup_once () =
-            if not !woken_up then (
-              woken_up := true;
-              wakeup ()
-            )
-          in
+      let trigger = Picos.Trigger.create () in
 
-          List.iter
-            (fun (When (ev, _)) ->
-              let cancel = ev.wait wakeup_once in
-              if cancel != Cancel_handle.dummy then
-                cancel_handlers := cancel :: !cancel_handlers)
-            brs);
+      (* make sure we call [wakeup] only once *)
+      let woken_up = Atomic.make false in
+      let wakeup_once () =
+        if not (Atomic.exchange woken_up true) then Picos.Trigger.signal trigger
+      in
 
-      List.iter (fun cb -> Cancel_handle.cancel cb) !cancel_handlers;
+      Picos.Trigger.await trigger |> Option.iter Exn_bt.raise;
+
+      List.iter
+        (fun (When (ev, _)) ->
+          let cancel = ev.wait wakeup_once in
+          if cancel != Cancel_handle.dummy then
+            cancel_handlers := cancel :: !cancel_handlers)
+        brs;
 
       (* poll again *)
       (select_rec_ [@tailcall]) brs

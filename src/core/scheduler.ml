@@ -23,17 +23,15 @@ type t = {
   mutable n_tasks: int;  (** Total number of tasks processed since the start *)
 }
 
-let k_current_scheduler : t option ref TLS.key =
-  TLS.new_key (fun () -> ref None)
+let k_current_scheduler : t TLS.t = TLS.create ()
 
 let () =
   (* to get current fiber, just get current scheduler *)
   Fiber.get_current_ :=
     fun () ->
-      let cur_sched = TLS.get k_current_scheduler in
-      match !cur_sched with
-      | Some s -> s.cur_fiber
-      | None -> None
+      match TLS.get_exn k_current_scheduler with
+      | s -> s.cur_fiber
+      | exception TLS.Not_set -> None
 
 exception Inactive
 
@@ -106,11 +104,11 @@ let[@inline] trace_exit_fiber_ (self : t) =
 
 (** Scheduler for the current thread *)
 let[@inline] get_for_current_thread () : t =
-  match !(TLS.get k_current_scheduler) with
-  | None ->
+  match TLS.get_exn k_current_scheduler with
+  | exception TLS.Not_set ->
     failwith
       "Scheduler.get_for_current_thread: must be run from inside the event loop"
-  | Some sch -> sch
+  | sch -> sch
 
 let[@inline] schedule_micro_task (f : unit -> unit) : unit =
   let self = get_for_current_thread () in
@@ -228,7 +226,7 @@ let run_task (self : t) (task : task) : unit =
     (match Fiber.peek fiber with
     | Some (Error ebt) ->
       (* cleanup *)
-      Exn_bt.discontinue k ebt (mk_handler self fiber)
+      Exn_bt.discontinue_with k ebt (mk_handler self fiber)
     | Some _ -> assert false
     | None ->
       (* continue running the fiber *)
@@ -236,7 +234,7 @@ let run_task (self : t) (task : task) : unit =
       trace_enter_fiber_ self fiber;
       ES.continue_with k x (mk_handler self fiber))
   | T_discont (fiber, k, ebt) ->
-    Exn_bt.discontinue k ebt (mk_handler self fiber)
+    Exn_bt.discontinue_with k ebt (mk_handler self fiber)
   | T_run f -> f ()
 
 let run_iteration (self : t) : unit =

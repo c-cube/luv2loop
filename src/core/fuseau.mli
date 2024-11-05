@@ -100,18 +100,19 @@ end
 
 (** Exception with backtrace *)
 module Exn_bt : sig
-  type t = Exn_bt.t = {
-    exn: exn;
-    bt: Printexc.raw_backtrace;
-  }
+  type t = exn * Printexc.raw_backtrace
 
   val make : exn -> Printexc.raw_backtrace -> t
   val get : exn -> t
   val get_callstack : int -> exn -> t
   val raise : t -> 'a
+  val pp : Format.formatter -> t -> unit
   val show : t -> string
 
   type nonrec 'a result = ('a, t) result
+
+  val unwrap : 'a result -> 'a
+  (** [unwrap (Ok x)] is [x], [unwrap (Error ebt)] re-raises [ebt]. *)
 end
 
 (** Time measurement *)
@@ -170,45 +171,7 @@ module Fiber : sig
   (**/**)
 end
 
-(** Fiber-local storage.
-
-    This storage is associated to the current fiber,
-    just like thread-local storage is associated with
-    the current thread.
-*)
-module FLS : sig
-  type 'a key
-  (** A key used to access a particular (typed) storage slot on
-      every fiber. *)
-
-  val new_key : init:(unit -> 'a) -> unit -> 'a key
-  (** [new_key ~init ()] makes a new key. Keys are expensive and
-    should never be allocated dynamically or in a loop.
-    The correct pattern is, at toplevel:
-
-    {[
-      let k_foo : foo FLS.key = FLS.new_key ~init:(fun () -> make_foo ()) ()
-
-    (* … *)
-
-    (* use it: *)
-    let _ = FLS.get k_foo
-    ]}
-*)
-
-  val get : 'a key -> 'a
-  (** Get the value for this key in the current fiber.
-    Only call from inside a fiber *)
-
-  val set : 'a key -> 'a -> unit
-  (** Set the value for this key in the current fiber.
-    Only call from inside a fiber *)
-
-  val with_value : 'a key -> 'a -> (unit -> 'b) -> 'b
-  (** [with_value k v f] runs [f()] in a context where key [k]
-    maps to value [v]. Once [f()] returns, the previous binding
-    of [k] is restored. *)
-end
+module FLS = Picos.Fiber.FLS
 
 (** {2 IO event loop} *)
 
@@ -315,20 +278,19 @@ module Iostream : sig
     This can be a [Buffer.t], an [out_channel], a [Unix.file_descr], etc.
     It must be buffered to amortize the cost of individual small writes (including
     [output_char]). *)
-    class type t =
-      object
-        method output_char : char -> unit
-        (** Output a single char *)
+    class type t = object
+      method output_char : char -> unit
+      (** Output a single char *)
 
-        method output : bytes -> int -> int -> unit
-        (** Output slice *)
+      method output : bytes -> int -> int -> unit
+      (** Output slice *)
 
-        method flush : unit -> unit
-        (** Flush underlying buffer *)
+      method flush : unit -> unit
+      (** Flush underlying buffer *)
 
-        method close : unit -> unit
-        (** Close the output. Must be idempotent. *)
-      end
+      method close : unit -> unit
+      (** Close the output. Must be idempotent. *)
+    end
 
     val create :
       ?flush:(unit -> unit) ->
@@ -382,15 +344,14 @@ module Iostream : sig
 
     This can be a [string], an [int_channel], an [Unix.file_descr], a
     decompression wrapper around another input stream, etc. *)
-    class type t =
-      object
-        method input : bytes -> int -> int -> int
-        (** Read into the slice. Returns [0] only if the
+    class type t = object
+      method input : bytes -> int -> int -> int
+      (** Read into the slice. Returns [0] only if the
         stream is closed. *)
 
-        method close : unit -> unit
-        (** Close the input. Must be idempotent. *)
-      end
+      method close : unit -> unit
+      (** Close the input. Must be idempotent. *)
+    end
 
     val create :
       ?close:(unit -> unit) -> input:(bytes -> int -> int -> int) -> unit -> t

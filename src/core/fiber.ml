@@ -1,38 +1,30 @@
 open Common_
 open Types
+module Comp = Picos.Computation
 
-type 'a state = 'a fiber_status =
-  | Done of 'a Exn_bt.result
+type 'a state = 'a Types.fiber_status =
+  | Done
   | Wait of {
       already_done: 'a Exn_bt.result option;
-      waiters: 'a fiber_callback list;
       children: any_fiber FM.t;  (** Set of children *)
-      on_cancel: cancel_callback list;
     }
 
-type 'a t = 'a fiber
+type 'a t = 'a Types.fiber
 type 'a callback = 'a Types.fiber_callback
 type cancel_callback = Exn_bt.t -> unit
 type any = Types.any_fiber = Any_fiber : _ t -> any [@@unboxed]
 
-let[@inline] peek self =
-  match A.get self.state with
-  | Done x -> Some x
-  | Wait _ -> None
+let[@inline] peek self = Comp.peek self.comp
 
-let[@inline] is_done self =
-  match A.get self.state with
-  | Done _ -> true
-  | _ -> false
+exception Running = Comp.Running
 
-let[@inline] is_cancelled self =
-  match A.get self.state with
-  | Done (Error _) -> true
-  | _ -> false
+let[@inline] peek_exn self = Comp.peek_exn self.comp
+let[@inline] is_done self = not (Comp.is_running self.comp)
+let[@inline] is_cancelled self = Comp.is_canceled self.comp
 
-let as_cancelled self =
+let as_cancelled_ self =
   match A.get self.state with
-  | Done (Error ebt) -> Some ebt
+  | Done -> Comp.canceled self.comp
   | Wait { already_done = Some (Error ebt); _ } -> Some ebt
   | _ -> None
 
@@ -40,17 +32,20 @@ let as_cancelled self =
     If the fiber is done already, call [f] immediately.
     [f] is called exactly once. *)
 let on_res (self : _ t) f =
-  while
-    match A.get self.state with
-    | Done x ->
-      f x;
-      false
-    | Wait ({ waiters = l; _ } as wait) as old ->
-      not
-        (A.compare_and_set self.state old (Wait { wait with waiters = f :: l }))
-  do
-    ()
-  done
+  let run_on_res f self =
+    let res =
+      match Comp.peek self.comp with
+      | None -> assert false
+      | Some res -> res
+    in
+    f res
+  in
+
+  let trigger =
+    (Picos.Trigger.from_action [@alert "-handler"]) f self (fun _tr f self ->
+        run_on_res f self)
+  in
+  if not (Comp.try_attach self.comp trigger) then run_on_res f self
 
 let fail_waiting_fiber (self : _ t) (ebt : Exn_bt.t) =
   while
@@ -67,15 +62,13 @@ let fail_waiting_fiber (self : _ t) (ebt : Exn_bt.t) =
 let resolve_to_final_state_and_call_waiters (self : _ t) : unit =
   (* get the final result *)
   match A.get self.state with
-  | Wait { already_done = Some (Ok _ as res); waiters; _ } ->
-    A.set self.state (Done res);
-    List.iter (fun (w : 'a fiber_callback) -> w res) waiters
-  | Wait { already_done = Some (Error ebt as res); waiters; on_cancel; _ } ->
-    A.set self.state (Done res);
-    (* also call cancel CBs *)
-    List.iter (fun f -> f ebt) on_cancel;
-    List.iter (fun (w : 'a fiber_callback) -> w res) waiters
-  | Done _ | Wait { already_done = None; _ } -> assert false
+  | Wait { already_done = Some (Ok x); _ } ->
+    A.set self.state Done;
+    Comp.return self.comp x
+  | Wait { already_done = Some (Error ebt); _ } ->
+    A.set self.state Done;
+    Comp.cancel self.comp (Exn_bt.exn ebt) (Exn_bt.bt ebt)
+  | Done | Wait { already_done = None; _ } -> assert false
 
 (** Call waiters with [res] once all [children] are done *)
 let call_waiters_and_set_res_once_children_are_done ~children (self : _ t) :
@@ -112,7 +105,7 @@ let resolve (self : 'a t) (r : 'a) : unit =
         false
       ) else
         true
-    | Wait { already_done = Some _; _ } | Done _ -> false
+    | Wait { already_done = Some _; _ } | Done -> false
   do
     ()
   done
@@ -122,19 +115,18 @@ let rec fail_fiber : type a. a t -> Exn_bt.t -> unit =
   (* Trace.messagef (fun k -> k "fail fiber[%d]" (self.id :> int)); *)
   while
     match A.get self.state with
-    | Wait ({ children; already_done = None; on_cancel; _ } as wait) as old ->
-      let new_st =
-        Wait { wait with already_done = Some (Error ebt); on_cancel = [] }
-      in
+    | Wait { already_done = Some (Error _); _ } -> false
+    | Wait ({ children; already_done = _; _ } as wait) as old ->
+      (* resolve as failed instead *)
+      let new_st = Wait { wait with already_done = Some (Error ebt) } in
       if A.compare_and_set self.state old new_st then (
         (* here, unlike in {!resolve_fiber}, we immediately cancel children *)
         cancel_children ~children ebt;
-        List.iter (fun cb -> cb ebt) on_cancel;
         call_waiters_and_set_res_once_children_are_done ~children self;
         false
       ) else
         true
-    | Wait { already_done = Some _; _ } | Done _ -> false
+    | Done -> false
   do
     ()
   done
@@ -184,36 +176,28 @@ exception Cancelled of Exn_bt.t
 
 let create ?(name = "") () =
   let id = Fiber_handle.fresh () in
+  let comp = Comp.create () in
   {
-    state =
-      A.make
-      @@ Wait
-           {
-             waiters = [];
-             already_done = None;
-             children = FM.empty;
-             on_cancel = [];
-           };
+    comp;
+    state = A.make @@ Wait { already_done = None; children = FM.empty };
     id;
     name;
-    fls = [||];
   }
 
 let[@inline] return x : _ t =
   let id = Fiber_handle.fresh () in
-  { id; fls = [||]; name = ""; state = A.make (Done (Ok x)) }
+  { id; name = ""; comp = Comp.returned x; state = A.make Done }
 
-let[@inline] fail ebt : _ t =
+let fail ebt : _ t =
   let id = Fiber_handle.fresh () in
-  { id; fls = [||]; name = ""; state = A.make (Done (Error ebt)) }
+  let comp = Comp.create () in
+  Comp.cancel comp (Exn_bt.exn ebt) (Exn_bt.bt ebt);
+  { id; name = ""; comp; state = A.make Done }
 
 let resolve = resolve
 let cancel = fail_fiber
 let add_child = add_child
 let[@inline] cancel_any (Any_fiber f) ebt = cancel f ebt
-
-let[@inline] suspend ~before_suspend =
-  Effect.perform @@ Effects.Suspend { before_suspend }
 
 (** A helper to get around circular dependencies. This is implemented via
       TLS, looking in the current thread's scheduler (if any). *)
@@ -224,102 +208,47 @@ let[@inline] get_current () : any =
   | None -> failwith "`Fiber.get_current` must be called from inside a fiber"
   | Some any -> any
 
-let add_cancel_cb_ (self : _ t) cb =
-  while
-    match A.get self.state with
-    | Wait ({ on_cancel; _ } as wait) as old ->
-      not
-        (A.compare_and_set self.state old
-           (Wait { wait with on_cancel = cb :: on_cancel }))
-    | Done (Error ebt) ->
-      cb ebt;
-      false
-    | Done (Ok _) -> false
-  do
-    ()
-  done
+let run_cancel_cb_ _trigger cb self =
+  match Comp.peek_exn self.comp with
+  | exception exn ->
+    let bt = Printexc.get_raw_backtrace () in
+    cb (Exn_bt.make exn bt)
+  | _ -> ()
 
-let remove_top_cancel_cb_ (self : _ t) =
-  while
-    match A.get self.state with
-    | Wait { on_cancel = []; _ } -> assert false
-    | Wait ({ on_cancel = _ :: tl; _ } as wait) as old ->
-      not (A.compare_and_set self.state old (Wait { wait with on_cancel = tl }))
-    | Done (Error _ebt) -> false
-    | Done (Ok _) -> false
-  do
-    ()
-  done
+let add_cancel_cb_with_trigger_ (self : _ t) cb trigger : bool =
+  let ok =
+    (Picos.Trigger.on_signal [@alert "-handler"]) trigger cb self run_cancel_cb_
+  in
+  assert ok;
+  Comp.try_attach self.comp trigger
+
+let add_cancel_cb_ (self : _ t) cb =
+  let trigger = Picos.Trigger.create () in
+  add_cancel_cb_with_trigger_ self cb trigger
 
 let with_cancel_callback cb (k : unit -> 'a) : 'a =
   match !get_current_ () with
   | None -> failwith "with_cancel_callback` must be called from inside a fiber"
   | Some (Any_fiber f) ->
-    add_cancel_cb_ f cb;
-    Fun.protect k ~finally:(fun () -> remove_top_cancel_cb_ f)
+    let trigger = Picos.Trigger.create () in
+    if add_cancel_cb_ f cb then
+      Fun.protect k ~finally:(fun () -> Comp.detach f.comp trigger)
+    else
+      k ()
 
-let[@inline] get_exn_ self =
-  match A.get self.state with
-  | Done (Ok x) -> x
-  | Done (Error ebt) -> Exn_bt.raise ebt
-  | Wait _ ->
-    Trace.message "fiber.getexn";
-    assert false
-
-let await self =
-  match A.get self.state with
-  | Done (Ok x) -> x
-  | Done (Error ebt) -> Exn_bt.raise ebt
-  | Wait _ ->
-    (* polling point *)
-    (match !get_current_ () with
-    | None ->
-      Trace.message "await outside of fiber";
-      failwith "`await` must be called from inside a fiber"
-    | Some (Any_fiber f) ->
-      (match A.get f.state with
-      | Done (Error ebt) -> Exn_bt.raise ebt
-      | _ -> ()));
-
-    (* wait for resolution *)
-    suspend ~before_suspend:(fun ~wakeup -> on_res self (fun _ -> wakeup ()));
-    get_exn_ self
+let[@inline] await self = Comp.await self.comp
 
 let try_await self =
-  match A.get self.state with
-  | Done res -> res
-  | Wait _ ->
-    (* polling point *)
-    (match !get_current_ () with
-    | None -> failwith "`await` must be called from inside a fiber"
-    | Some (Any_fiber f) ->
-      (match A.get f.state with
-      | Done (Error ebt) -> Exn_bt.raise ebt
-      | _ -> ()));
+  try Ok (await self)
+  with exn ->
+    let bt = Printexc.get_raw_backtrace () in
+    let ebt = Exn_bt.make exn bt in
+    Error ebt
 
-    (* wait for resolution *)
-    Effect.perform
-    @@ Effects.Suspend
-         { before_suspend = (fun ~wakeup -> on_res self (fun _ -> wakeup ())) };
-
-    (match A.get self.state with
-    | Done res -> res
-    | Wait _ -> assert false)
-
-let yield () =
-  (* polling point *)
-  (match !get_current_ () with
-  | None -> failwith "yield` must be called from inside a fiber"
-  | Some (Any_fiber f) ->
-    (match A.get f.state with
-    | Done (Error ebt) -> Exn_bt.raise ebt
-    | Done _ -> assert false (* computation is still running *)
-    | Wait _ -> ()));
-
-  Effect.perform Effects.Yield
+let yield = Picos.Fiber.yield
 
 module Private_ = struct
   let create = create
   let cancel = cancel
-  let as_cancelled = as_cancelled
+  let as_cancelled = as_cancelled_
 end

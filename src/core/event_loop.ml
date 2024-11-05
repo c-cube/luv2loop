@@ -6,22 +6,21 @@
 *)
 
 (** Abstract event loop, inspired by Lwt engine *)
-class type t =
-  object
-    method one_step : block:bool -> unit -> unit
-    (** Run one step of the event loop.
+class type t = object
+  method one_step : block:bool -> unit -> unit
+  (** Run one step of the event loop.
         @param block if [true], the call might block until the next timeout
         or until the next IO event occurs. If [false], this does not
         block and returns after having processed the available events. *)
 
-    method on_timer :
-      float -> repeat:bool -> (Cancel_handle.t -> unit) -> Cancel_handle.t
-    (** [on_timer delay ~repeat f] runs [f] after [delay].
+  method on_timer :
+    float -> repeat:bool -> (Cancel_handle.t -> unit) -> Cancel_handle.t
+  (** [on_timer delay ~repeat f] runs [f] after [delay].
         @param repeat if true runs [f] every [delay] seconds *)
 
-    method interrupt_if_in_blocking_section : unit
-    (** If run from inside the event loop when it's waiting, wakes the event loop up *)
-  end
+  method interrupt_if_in_blocking_section : unit
+  (** If run from inside the event loop when it's waiting, wakes the event loop up *)
+end
 
 let[@inline] one_step (self : #t) ~block () = self#one_step ~block ()
 

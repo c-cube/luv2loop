@@ -3,9 +3,10 @@ open Common_
 exception Timeout
 
 let[@inline] get_sched what () : Scheduler.t =
-  match !(TLS.get Scheduler.k_current_scheduler) with
-  | None -> failwith @@ spf "%s must run from inside the fuseau scheduler" what
-  | Some s -> s
+  match TLS.get_exn Scheduler.k_current_scheduler with
+  | exception TLS.Not_set ->
+    failwith @@ spf "%s must run from inside the fuseau scheduler" what
+  | s -> s
 
 let cancel_after_s (delay : float) =
   let ebt = Exn_bt.get_callstack 15 Timeout in
@@ -17,9 +18,9 @@ let cancel_after_s (delay : float) =
     | Some f -> f
   in
 
-  let cancel ev =
+  let cancel ev : unit =
     Fiber.cancel_any fiber ebt;
-    Cancel_handle.cancel ev
+    Cancel_handle.cancel ev ebt
   in
 
   if delay > 50e-9 then (

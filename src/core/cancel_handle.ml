@@ -1,8 +1,8 @@
-(** Cancelation handle. *)
+type t = Picos.Computation.packed
 
-type t = { cancel: unit -> unit } [@@unboxed]
-(** A handle to cancel atomic actions (waiting on something) *)
+let dummy : t = Picos.Computation.(Packed (create ()))
 
-let[@inline] cancel self = self.cancel ()
-let[@inline] make ~cancel () : t = { cancel }
-let dummy : t = { cancel = ignore }
+(** Cancel the handle *)
+let[@inline] cancel (self : t) (ebt : Exn_bt.t) : unit =
+  let (Packed c) = self in
+  Picos.Computation.cancel c (Exn_bt.exn ebt) (Exn_bt.bt ebt)
